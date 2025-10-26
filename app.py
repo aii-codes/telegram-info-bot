@@ -129,6 +129,9 @@ async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # 5️⃣ Main bot setup and run
 async def main():
+    # start the /health route alongside your bot
+    asyncio.create_task(start_web_server())
+    
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # 🧠 Add professional menu commands
@@ -151,6 +154,21 @@ async def main():
 
     print("🤖 InfoBot is running with a professional menu...")
     await app.run_polling()  # type: ignore[func-returns-value]
+
+# --- 6️⃣ Health Check for Render Uptime ---
+from aiohttp import web
+
+async def handle_health(request):
+    return web.Response(text="ok")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/health", handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 10000)
+    await site.start()
+    print("🌐 Health check server running on port 10000")
 
 # --- Entry point ---
 if __name__ == "__main__":
