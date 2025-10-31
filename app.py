@@ -135,7 +135,7 @@ async def start_web_server():
 # --- Self-ping background task ---
 async def self_ping_task():
     await asyncio.sleep(30)
-    url = f"https://{os.getenv('RENDER_EXTERNAL_URL', '')}/health"
+    url = f"{os.getenv('RENDER_EXTERNAL_URL', '')}/health"
     if not url or "http" not in url:
         logging.warning("⚠️ No RENDER_EXTERNAL_URL found; skipping self-ping.")
         return
