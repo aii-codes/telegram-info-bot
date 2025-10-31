@@ -1,11 +1,6 @@
-# pyright: reportOptionalMemberAccess=false, reportArgumentType=false
-import nest_asyncio
-nest_asyncio.apply()
-
 import os
 import aiohttp
 import asyncio
-import threading
 import logging
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
@@ -16,7 +11,6 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from telegram.error import Conflict
 from aiohttp import web
 
 # --- Logging setup ---
@@ -25,9 +19,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# --- Load BOT_TOKEN ---
+# --- Load BOT_TOKEN with type safety ---
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN: str = os.getenv("BOT_TOKEN") or ""
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN not found in environment variables.")
 
@@ -35,7 +29,7 @@ if not BOT_TOKEN:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text(
-            "👋 Hello! I'm InfoBot — your friendly info assistant.\n\n"
+            "👋 Hello! I'm InfoBot – your friendly info assistant.\n\n"
             "Type /help to see what I can do."
         )
 
@@ -48,7 +42,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/joke - Get a random programming joke\n"
             "/fact - Get a random fact\n"
             "/weather <city> - Get current weather info\n\n"
-            "Or just type anything, and I’ll reply!"
+            "Or just type anything, and I'll reply!"
         )
 
 async def joke_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -122,6 +116,7 @@ async def handle_health(request):
     return web.Response(text="ok")
 
 async def start_web_server():
+    """Start the health check web server"""
     app = web.Application()
     app.router.add_get("/health", handle_health)
     runner = web.AppRunner(app)
@@ -130,71 +125,87 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logging.info(f"🌐 Health check server running on port {port}")
+    # Keep the server running
+    await asyncio.Event().wait()
 
 
 # --- Self-ping background task ---
 async def self_ping_task():
-    await asyncio.sleep(30)
+    """Ping own health endpoint every 10 minutes to keep service alive"""
+    await asyncio.sleep(30)  # Initial delay
     url = f"{os.getenv('RENDER_EXTERNAL_URL', '')}/health"
     if not url or "http" not in url:
         logging.warning("⚠️ No RENDER_EXTERNAL_URL found; skipping self-ping.")
         return
+    
     while True:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    logging.info(f"🔁 Self-ping -> {url} [{resp.status}]")
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    logging.info(f"🔄 Self-ping -> {url} [{resp.status}]")
         except Exception as e:
             logging.warning(f"Self-ping failed: {e}")
-        await asyncio.sleep(600)  # 10 min
+        await asyncio.sleep(600)  # 10 minutes
 
 
-# --- Bot runner (non-awaitable polling) ---
-def run_bot():
-    while True:
-        try:
-            app = ApplicationBuilder().token(BOT_TOKEN).build()
-            app.add_handler(CommandHandler("start", start))
-            app.add_handler(CommandHandler("help", help_command))
-            app.add_handler(CommandHandler("joke", joke_command))
-            app.add_handler(CommandHandler("fact", fact_command))
-            app.add_handler(CommandHandler("weather", weather_command))
-            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
+# --- Main async function ---
+async def main():
+    """Main function that runs everything concurrently"""
+    # Build the bot application - BOT_TOKEN is guaranteed to be str here
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # Add handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("joke", joke_command))
+    app.add_handler(CommandHandler("fact", fact_command))
+    app.add_handler(CommandHandler("weather", weather_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
+    
+    # Set bot commands menu
+    await app.bot.set_my_commands([
+        BotCommand("start", "Start the bot"),
+        BotCommand("help", "Show help message"),
+        BotCommand("joke", "Get a random joke"),
+        BotCommand("fact", "Get a random fact"),
+        BotCommand("weather", "Check weather for a city"),
+    ])
+    
+    logging.info("🤖 InfoBot is starting...")
+    
+    # Initialize the application
+    await app.initialize()
+    await app.start()
+    
+    # Type safety check for updater
+    if not app.updater:
+        raise RuntimeError("❌ Failed to initialize bot updater")
+    
+    # Create tasks for concurrent execution
+    tasks = [
+        asyncio.create_task(start_web_server(), name="web_server"),
+        asyncio.create_task(self_ping_task(), name="self_ping"),
+        asyncio.create_task(app.updater.start_polling(), name="bot_polling"),
+    ]
+    
+    logging.info("✅ All services started successfully!")
+    
+    # Wait for all tasks
+    try:
+        await asyncio.gather(*tasks)
+    except KeyboardInterrupt:
+        logging.info("🛑 Shutting down...")
+    finally:
+        # Cleanup - safe to access updater now since we checked it exists
+        if app.updater:
+            await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
 
-            # Set menu commands (async-safe setup)
-            try:
-                asyncio.run(app.bot.set_my_commands([
-                    BotCommand("start", "Start the bot"),
-                    BotCommand("help", "Show help message"),
-                    BotCommand("joke", "Get a random joke"),
-                    BotCommand("fact", "Get a random fact"),
-                    BotCommand("weather", "Check weather for a city"),
-                ]))
-            except RuntimeError:
-                loop = asyncio.get_event_loop()
-                loop.run_until_complete(app.bot.set_my_commands([
-                    BotCommand("start", "Start the bot"),
-                    BotCommand("help", "Show help message"),
-                    BotCommand("joke", "Get a random joke"),
-                    BotCommand("fact", "Get a random fact"),
-                    BotCommand("weather", "Check weather for a city"),
-                ]))
-
-            logging.info("🤖 InfoBot is running...")
-            app.run_polling()  # synchronous, no await ✅
-
-        except Conflict:
-            logging.warning("⚠️ Another polling instance detected. Retrying in 10 s...")
-            asyncio.run(asyncio.sleep(10))
-        except Exception as e:
-            logging.error(f"Unexpected error: {e}")
-            asyncio.run(asyncio.sleep(10))
 
 # --- Entry point ---
 if __name__ == "__main__":
     try:
-        threading.Thread(target=lambda: asyncio.run(start_web_server()), daemon=True).start()
-        threading.Thread(target=lambda: asyncio.run(self_ping_task()), daemon=True).start()
-        run_bot()
-    except (KeyboardInterrupt, RuntimeError):
+        asyncio.run(main())
+    except KeyboardInterrupt:
         logging.info("🛑 Bot stopped gracefully.")
