@@ -55,13 +55,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/help - Show this help message\n"
             "/joke - Get a random programming joke\n"
             "/fact - Get a random fact\n"
+            "/weather <city> - Get current weather info\n"
+            "/news - Get the latest news\n"
             "/quote - Get an inspirational quote\n"
-            "/news - Get top news headlines\n"
-            "/define <word> - Look up a word definition\n"
-            "/weather <city> - Get current weather info for a city\n\n"
-            "If you use `/weather` without a city I'll show a quick list of common cities you can pick from.\n\n"
-            "Or just type anything, and I'll reply!"
+            "/define <word> - Look up a word definition\n\n"
+            "💬 You can also just chat with me naturally — I'll reply using AI!"
         )
+
 
 async def joke_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -194,10 +194,6 @@ async def weather_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.edit_message_text("❌ Unknown action.")
 
-async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message:
-        await update.message.reply_text(f"You said: {update.message.text}")
-
 # --- 4️⃣ News Command ---
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetch top news headlines from NewsAPI"""
@@ -266,6 +262,61 @@ async def define_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("❌ Couldn't parse definition result.")
             else:
                 await update.message.reply_text("❌ Word not found.")
+
+# --- AI Chat Handler (Mistral Integration) ---
+async def generate_ai_reply(message: str) -> str:
+    """Send user message to Mistral AI and return the reply"""
+    api_key = os.getenv("AI_API_KEY")
+    if not api_key:
+        return "⚠️ AI service is not configured yet."
+
+    url = "https://api.mistral.ai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "mistral-tiny",
+        "messages": [
+            {"role": "system", "content": "You are InfoBot, a helpful, friendly assistant. Keep answers concise and kind."},
+            {"role": "user", "content": message}
+        ],
+        "temperature": 0.7
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    content = data["choices"][0]["message"].get("content") or ""
+                    return content.strip()
+                else:
+                    logging.error(f"AI API Error {resp.status}: {await resp.text()}")
+                    return "⚠️ I'm having trouble thinking right now. Try again later!"
+    except Exception as e:
+        logging.warning(f"AI request failed: {e}")
+        return "❌ I couldn't connect to my brain. Please try again later."
+
+async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reply with AI if message isn't a command"""
+    if not update.message:
+        return
+
+    user_text = (update.message.text or "").strip()
+
+    # Skip if message looks like a bot command
+    if user_text.startswith("/"):
+        return
+
+    # Use AI for all non-command messages
+    ai_reply = await generate_ai_reply(user_text)
+    await update.message.reply_text(ai_reply)
 
 # --- Health check server ---
 async def handle_health(request):
