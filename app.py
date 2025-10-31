@@ -110,6 +110,75 @@ async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text(f"You said: {update.message.text}")
 
+# --- 4️⃣ News Command ---
+async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetch top news headlines from NewsAPI"""
+    # FIX: Add message existence check
+    if not update.message:
+        return
+    
+    api_key = os.getenv("NEWS_API_KEY")
+    if not api_key:
+        await update.message.reply_text("⚠️ NEWS_API_KEY not set in environment.")
+        return
+    
+    url = f"https://newsapi.org/v2/top-headlines?country=us&pageSize=3&apiKey={api_key}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                articles = data.get("articles", [])
+                if not articles:
+                    await update.message.reply_text("😶 No news found.")
+                    return
+                headlines = "\n\n".join(
+                    [f"🗞️ {a['title']}\n🔗 {a['url']}" for a in articles[:3]]
+                )
+                await update.message.reply_text(f"📰 Top Headlines:\n\n{headlines}")
+            else:
+                await update.message.reply_text("❌ Couldn't fetch news right now.")
+
+
+# --- 5️⃣ Quote Command ---
+async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetch a random motivational quote"""
+    # FIX: Add message existence check
+    if not update.message:
+        return
+    
+    url = "https://zenquotes.io/api/random"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            if response.status == 200:
+                data = await response.json()
+                quote = data[0]["q"]
+                author = data[0]["a"]
+                await update.message.reply_text(f"💬 \"{quote}\"\n— {author}")
+            else:
+                await update.message.reply_text("❌ Couldn't fetch a quote right now.")
+
+
+# --- 6️⃣ Define Command ---
+async def define_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetch a word definition"""
+    # FIX: Add message existence check
+    if not update.message:
+        return
+    
+    if not context.args:
+        await update.message.reply_text("📘 Usage: /define <word>")
+        return
+
+    word = context.args[0]
+    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                meaning = data[0]["meanings"][0]["definitions"][0]["definition"]
+                await update.message.reply_text(f"📖 Definition of {word}:\n{meaning}")
+            else:
+                await update.message.reply_text("❌ Word not found.")
 
 # --- Health check server ---
 async def handle_health(request):
@@ -160,6 +229,9 @@ async def main():
     app.add_handler(CommandHandler("joke", joke_command))
     app.add_handler(CommandHandler("fact", fact_command))
     app.add_handler(CommandHandler("weather", weather_command))
+    app.add_handler(CommandHandler("news", news_command))
+    app.add_handler(CommandHandler("quote", quote_command))
+    app.add_handler(CommandHandler("define", define_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
     
     # Set bot commands menu
@@ -169,6 +241,9 @@ async def main():
         BotCommand("joke", "Get a random joke"),
         BotCommand("fact", "Get a random fact"),
         BotCommand("weather", "Check weather for a city"),
+        BotCommand("news", "Get the latest news"),
+        BotCommand("quote", "Get an inspirational quote"),
+        BotCommand("define", "Look up a word definition"),
     ])
     
     logging.info("🤖 InfoBot is starting...")
