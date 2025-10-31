@@ -1,12 +1,12 @@
 # pyright: reportOptionalMemberAccess=false, reportArgumentType=false
-
-# --- 🧩 Fix event loop conflict (MUST be first) ---
 import nest_asyncio
 nest_asyncio.apply()
 
 import os
 import aiohttp
 import asyncio
+import threading
+import logging
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
 from telegram.ext import (
@@ -16,23 +16,23 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from telegram.error import Conflict
+from aiohttp import web
 
-import logging
-
+# --- Logging setup ---
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 
-# 1️⃣ Load environment variables (BOT_TOKEN)
+# --- Load BOT_TOKEN ---
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN not found in environment variables. Check your .env file!")
+    raise ValueError("❌ BOT_TOKEN not found in environment variables.")
 
-# 2️⃣ Define command handlers
+# --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a welcome message when the /start command is issued."""
     if update.message:
         await update.message.reply_text(
             "👋 Hello! I'm InfoBot — your friendly info assistant.\n\n"
@@ -40,7 +40,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a list of available commands."""
     if update.message:
         await update.message.reply_text(
             "🧠 Available Commands:\n"
@@ -52,9 +51,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Or just type anything, and I’ll reply!"
         )
 
-# --- 1️⃣ Random Joke Command ---
 async def joke_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fetch a random programming joke."""
     if not update.message:
         return
     url = "https://official-joke-api.appspot.com/random_joke"
@@ -67,9 +64,7 @@ async def joke_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text("❌ Couldn't fetch a joke right now.")
 
-# --- 2️⃣ Random Fact Command ---
 async def fact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fetch a random fact."""
     if not update.message:
         return
     url = "https://uselessfacts.jsph.pl/random.json?language=en"
@@ -82,12 +77,9 @@ async def fact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text("❌ Couldn't fetch a fact right now.")
 
-# --- 3️⃣ Weather Command ---
 async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fetch current weather using Open-Meteo API."""
     if not update.message:
         return
-
     if not context.args:
         await update.message.reply_text("🌤️ Usage: /weather <city>")
         return
@@ -120,44 +112,12 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await update.message.reply_text("❌ Couldn't fetch weather right now.")
 
-# --- 4️⃣ Echo fallback ---
 async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Echo any user message."""
     if update.message:
-        user_text = update.message.text
-        await update.message.reply_text(f"You said: {user_text}")
+        await update.message.reply_text(f"You said: {update.message.text}")
 
-# 5️⃣ Main bot setup and run
-async def main():
-    # start the /health route alongside your bot
-    asyncio.create_task(start_web_server())
-    
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # 🧠 Add professional menu commands
-    commands = [
-        BotCommand("start", "Start the bot"),
-        BotCommand("help", "Show help message"),
-        BotCommand("joke", "Get a random joke"),
-        BotCommand("fact", "Get a random fact"),
-        BotCommand("weather", "Check weather for a city"),
-    ]
-    await app.bot.set_my_commands(commands)
-
-    # Register handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("joke", joke_command))
-    app.add_handler(CommandHandler("fact", fact_command))
-    app.add_handler(CommandHandler("weather", weather_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
-
-    print("🤖 InfoBot is running with a professional menu...")
-    await app.run_polling()  # type: ignore[func-returns-value]
-
-# --- 6️⃣ Health Check for Render Uptime ---
-from aiohttp import web
-
+# --- Health check server ---
 async def handle_health(request):
     return web.Response(text="ok")
 
@@ -169,13 +129,72 @@ async def start_web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print("🌐 Health check server running on port 10000")
+    logging.info(f"🌐 Health check server running on port {port}")
+
+
+# --- Self-ping background task ---
+async def self_ping_task():
+    await asyncio.sleep(30)
+    url = f"https://{os.getenv('RENDER_EXTERNAL_URL', '')}/health"
+    if not url or "http" not in url:
+        logging.warning("⚠️ No RENDER_EXTERNAL_URL found; skipping self-ping.")
+        return
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    logging.info(f"🔁 Self-ping -> {url} [{resp.status}]")
+        except Exception as e:
+            logging.warning(f"Self-ping failed: {e}")
+        await asyncio.sleep(600)  # 10 min
+
+
+# --- Bot runner (non-awaitable polling) ---
+def run_bot():
+    while True:
+        try:
+            app = ApplicationBuilder().token(BOT_TOKEN).build()
+            app.add_handler(CommandHandler("start", start))
+            app.add_handler(CommandHandler("help", help_command))
+            app.add_handler(CommandHandler("joke", joke_command))
+            app.add_handler(CommandHandler("fact", fact_command))
+            app.add_handler(CommandHandler("weather", weather_command))
+            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
+
+            # Set menu commands (async-safe setup)
+            try:
+                asyncio.run(app.bot.set_my_commands([
+                    BotCommand("start", "Start the bot"),
+                    BotCommand("help", "Show help message"),
+                    BotCommand("joke", "Get a random joke"),
+                    BotCommand("fact", "Get a random fact"),
+                    BotCommand("weather", "Check weather for a city"),
+                ]))
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(app.bot.set_my_commands([
+                    BotCommand("start", "Start the bot"),
+                    BotCommand("help", "Show help message"),
+                    BotCommand("joke", "Get a random joke"),
+                    BotCommand("fact", "Get a random fact"),
+                    BotCommand("weather", "Check weather for a city"),
+                ]))
+
+            logging.info("🤖 InfoBot is running...")
+            app.run_polling()  # synchronous, no await ✅
+
+        except Conflict:
+            logging.warning("⚠️ Another polling instance detected. Retrying in 10 s...")
+            asyncio.run(asyncio.sleep(10))
+        except Exception as e:
+            logging.error(f"Unexpected error: {e}")
+            asyncio.run(asyncio.sleep(10))
 
 # --- Entry point ---
 if __name__ == "__main__":
     try:
-        asyncio.get_event_loop().run_until_complete(main())
+        threading.Thread(target=lambda: asyncio.run(start_web_server()), daemon=True).start()
+        threading.Thread(target=lambda: asyncio.run(self_ping_task()), daemon=True).start()
+        run_bot()
     except (KeyboardInterrupt, RuntimeError):
-        print("\n🛑 Bot stopped gracefully.")
-
-
+        logging.info("🛑 Bot stopped gracefully.")
